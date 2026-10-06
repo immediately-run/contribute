@@ -33,5 +33,5 @@
     "vite": "^8.0.9",
     "vitest": "^3.2.4"
   },
-  "description": "The contribute dialog as an immediately.run app \u2014 streams a save (PR or direct commit) of your edits."
+  "description": "The contribute dialog as an immediately.run app — streams a save (PR or direct commit) of your edits."
 }
