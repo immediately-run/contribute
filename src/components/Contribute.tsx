@@ -11,6 +11,7 @@ import {
   type ContributionEvent,
   type ContributionResult,
 } from "@immediately-run/sdk";
+import { BRANCH_NAME_PLACEHOLDER, saveOptions } from "../lib/saveOptions";
 import "./Contribute.css";
 
 type Phase =
@@ -39,16 +40,25 @@ const STAGE_LABEL: Record<string, string> = {
 export default function Contribute() {
   const { dirtyPaths } = useEditorContext();
   const [message, setMessage] = useState("");
+  const [branchName, setBranchName] = useState("");
   const [mode, setMode] = useState<ContributeMode>("pr");
   const [phase, setPhase] = useState<Phase>({ kind: "idle" });
 
   const busy = phase.kind === "running";
   const nothingToSave = dirtyPaths.length === 0;
+  // R3-985: validate the typed name once non-empty; an invalid one shows the reason
+  // inline and disables save. An untouched/empty field never errors.
+  const branchCheck = branchName.trim() === "" ? null : saveOptions({ message, branchName, mode });
+  const branchError = branchCheck && !branchCheck.ok ? branchCheck.reason : null;
 
   const run = useCallback(async () => {
     setPhase({ kind: "running", stage: "starting" });
     try {
-      const stream = contribute({ commitMessage: message.trim() || "Update", mode });
+      // The mapping is saveOptions': a typed branch name rides along (validated
+      // there), an empty field sends none (the host generates the default).
+      const opts = saveOptions({ message, branchName, mode });
+      if (!opts.ok) return; // the save button is disabled in this state; belt and braces
+      const stream = contribute(opts.options);
       let result: ContributionResult | undefined;
       for await (const ev of stream as AsyncGenerator<ContributionEvent, ContributionResult>) {
         if (ev.stage === "install-required") {
@@ -77,7 +87,7 @@ export default function Contribute() {
       const code = (e as { code?: string })?.code ?? "unknown";
       setPhase({ kind: "error", code, message: (e as Error)?.message ?? "Save failed" });
     }
-  }, [message, mode]);
+  }, [message, branchName, mode]);
 
   const errorHint = useMemo(() => {
     if (phase.kind !== "error") return null;
@@ -135,6 +145,20 @@ export default function Contribute() {
         />
       </label>
 
+      {mode === "pr" && (
+        <label className="ct-field">
+          <span className="ct-label">Branch name</span>
+          <input
+            className="ct-input"
+            value={branchName}
+            placeholder={BRANCH_NAME_PLACEHOLDER}
+            onChange={(e) => setBranchName(e.target.value)}
+            disabled={busy}
+          />
+          {branchError && <span className="ct-field-error">Invalid branch name: {branchError}</span>}
+        </label>
+      )}
+
       <div className="ct-mode" role="radiogroup" aria-label="Save mode">
         <label className="ct-radio">
           <input
@@ -162,7 +186,7 @@ export default function Contribute() {
         type="button"
         className="ct-save"
         onClick={run}
-        disabled={busy || nothingToSave}
+        disabled={busy || nothingToSave || branchError !== null}
       >
         {busy ? STAGE_LABEL[phase.stage] ?? "Saving…" : mode === "direct" ? "Commit" : "Open pull request"}
       </button>
