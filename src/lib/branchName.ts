@@ -20,31 +20,33 @@ const hasControlOrSpace = (name: string): boolean => {
 const INVALID_BRANCH_PUNCTUATION = /[~^:?*[\\]/;
 
 export const validateBranchName = (name: string): BranchValidation => {
-  if (!name) return { ok: false, reason: 'empty' };
+  if (!name) return { ok: false, reason: "empty" };
   // A leading dash reads as a command-line option; git refuses it for the whole
   // name only (`feature/-x` is a valid branch), so this is not a per-component rule.
-  if (name.startsWith('-')) return { ok: false, reason: 'cannot start with "-"' };
-  if (name.startsWith('/') || name.endsWith('/')) {
+  if (name.startsWith("-"))
+    return { ok: false, reason: 'cannot start with "-"' };
+  if (name.startsWith("/") || name.endsWith("/")) {
     return { ok: false, reason: 'cannot start or end with "/"' };
   }
-  if (name.startsWith('.') || name.endsWith('.')) {
+  if (name.startsWith(".") || name.endsWith(".")) {
     return { ok: false, reason: 'cannot start or end with "."' };
   }
-  if (name.includes('..')) return { ok: false, reason: 'cannot contain ".."' };
-  if (name.includes('@{')) return { ok: false, reason: 'cannot contain "@{"' };
-  if (name === '@') return { ok: false, reason: 'cannot be just "@"' };
-  if (name.endsWith('.lock')) return { ok: false, reason: 'cannot end with ".lock"' };
+  if (name.includes("..")) return { ok: false, reason: 'cannot contain ".."' };
+  if (name.includes("@{")) return { ok: false, reason: 'cannot contain "@{"' };
+  if (name === "@") return { ok: false, reason: 'cannot be just "@"' };
+  if (name.endsWith(".lock"))
+    return { ok: false, reason: 'cannot end with ".lock"' };
   if (hasControlOrSpace(name) || INVALID_BRANCH_PUNCTUATION.test(name)) {
-    return { ok: false, reason: 'contains an invalid character' };
+    return { ok: false, reason: "contains an invalid character" };
   }
-  if (name.includes('//')) return { ok: false, reason: 'cannot contain "//"' };
+  if (name.includes("//")) return { ok: false, reason: 'cannot contain "//"' };
   // Per-component rules: git applies "cannot begin with a dot" and "cannot end
   // with .lock" to EACH slash-separated component, not just the whole ref.
-  for (const component of name.split('/')) {
-    if (component.startsWith('.')) {
+  for (const component of name.split("/")) {
+    if (component.startsWith(".")) {
       return { ok: false, reason: 'a path component cannot start with "."' };
     }
-    if (component.endsWith('.lock')) {
+    if (component.endsWith(".lock")) {
       return { ok: false, reason: 'a path component cannot end with ".lock"' };
     }
   }

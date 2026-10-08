@@ -1,7 +1,10 @@
 /* The contribute dialog. Follows the host chrome (light/dark) via CSS variables
    the host theme drives; kept self-contained so the app renders standalone too. */
 .contribute {
-  font: 13px/1.5 system-ui, -apple-system, sans-serif;
+  font:
+    13px/1.5 system-ui,
+    -apple-system,
+    sans-serif;
   color: var(--ct-fg, #e6e6e6);
   background: var(--ct-bg, #1b1d21);
   padding: 16px;
@@ -133,4 +136,15 @@
   padding: 4px 8px;
   cursor: pointer;
   font: inherit;
+}
+
+/* R3-994: the use-different-name recovery hint — the message line then the §8.8
+   checkbox, spaced off each other and off the error message above. */
+.ct-recovery-hint p {
+  margin: 6px 0 4px;
+}
+.ct-recovery-hint .ct-radio {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
 }
