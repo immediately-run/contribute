@@ -31,7 +31,6 @@ vi.mock("@immediately-run/sdk", () => {
     },
     contribute,
     useEditorContext: () => ({ dirtyPaths: dirty }),
-    openExternal: vi.fn(async () => ({ ok: true })),
   };
 });
 
@@ -165,6 +164,9 @@ describe("Contribute — the recovery actions (R3-994, CONTRIBUTE_SPEC §12)", (
       name: /open the pull request/i,
     });
     fireEvent.click(resume);
+    // The settle-wait (the sibling's shape): the re-run's stream updates state
+    // after the click — flush it inside the test, not as an act() warning.
+    await screen.findByRole("button", { name: /open pull request/i }).catch(() => {});
     // The re-run carries the resume with the event's context, unchanged — and
     // never re-pushes (no fresh branchName options beyond the form's own).
     const call = sdk.contribute.mock.calls.at(-1)?.[0] as Record<
