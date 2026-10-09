@@ -65,8 +65,9 @@ export default function Contribute() {
   // R3-964/986 (CONTRIBUTE_SPEC §15.0): the save mode facts ride the host's
   // VcsState push — no app-side GitHub call. Absent facts render today's form.
   const vcs = useVcsState();
-  // The default (rule 4) applies ONCE, when the fact first arrives; a choice the
-  // user already made is never overwritten. (Adjusted during render, the
+  // The default (rule 4) applies when the fact first arrives — and re-applies
+  // if the host's answer CHANGES before the user chooses — but never
+  // overwrites a choice the user has made. (Adjusted during render, the
   // sanctioned pattern — an effect's setState is a cascading render, and this
   // app's lint refuses it.)
   const [modeTouched, setModeTouched] = useState(false);
