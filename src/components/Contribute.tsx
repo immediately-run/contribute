@@ -7,6 +7,7 @@ import { useCallback, useMemo, useState } from "react";
 import {
   contribute,
   useEditorContext,
+  useVcsState,
   type ContributeMode,
   type ContributeOptions,
   type ContributionEvent,
@@ -26,7 +27,16 @@ type Phase =
       targetOwner: string;
       targetRepo: string;
     }
-  | { kind: "done"; result: ContributionResult }
+  | {
+      kind: "done";
+      result: ContributionResult;
+      /** The PR this run UPDATED (the openPR fact at run start) — the wire's
+       *  done event carries no mode, so the update copy keys on this. */
+      updatedPr: number | null;
+      /** The ref a direct commit landed on (the commit-pushed event, else the
+       *  target's) — the done event carries no branchName either. */
+      committedRef: string | null;
+    }
   // R3-994: the error phase carries the recovery plan (from the event's
   // `recovery` field + whether the branch name was typed) and the event's real
   // code when there is one — the event carries none, the catch path carries the
@@ -61,6 +71,37 @@ export default function Contribute() {
   const [mode, setMode] = useState<ContributeMode>("pr");
   const [phase, setPhase] = useState<Phase>({ kind: "idle" });
 
+  // R3-964/986 (CONTRIBUTE_SPEC §15.0): the save mode facts ride the host's
+  // VcsState push — no app-side GitHub call. Absent facts render today's form.
+  const vcs = useVcsState();
+  // The default (rule 4) applies when the fact first arrives — and re-applies
+  // if the host's answer CHANGES before the user chooses — but never
+  // overwrites a choice the user has made. (Adjusted during render, the
+  // sanctioned pattern — an effect's setState is a cascading render, and this
+  // app's lint refuses it.)
+  const [modeTouched, setModeTouched] = useState(false);
+  // `undefined` initially, NOT the first render's value — the fact may already
+  // be set at mount, and initialising to it would make the change check
+  // vacuous exactly when the default is present from the start.
+  const [appliedDefault, setAppliedDefault] = useState<typeof vcs.defaultSaveMode>(undefined);
+  if (vcs.defaultSaveMode !== appliedDefault) {
+    setAppliedDefault(vcs.defaultSaveMode);
+    if (!modeTouched && vcs.defaultSaveMode) setMode(vcs.defaultSaveMode);
+  }
+
+  // Rule 1: an open PR on the loaded branch — the picker hides, the run updates it.
+  const openPR = vcs.openPR ?? null;
+  // Rule 2: a tag/commit load forces a PR against the default branch.
+  const nonBranchTarget = (vcs.target ?? null) !== null && vcs.target!.refKind !== "branch";
+  // Rule 3: no push access upstream forces the fork PR.
+  const noPush = vcs.canPushUpstream === false;
+  // …and while the probe is still out (null), the direct radio is disabled, not
+  // hidden — the choice exists, its answer is not in yet.
+  const pushUnknown = vcs.canPushUpstream === null;
+  const directHidden = openPR !== null || nonBranchTarget || noPush;
+  // A hidden radio can't stay checked (same render-time adjustment as above).
+  if (directHidden && mode === "direct") setMode("pr");
+
   const busy = phase.kind === "running";
   const nothingToSave = dirtyPaths.length === 0;
   // R3-985: validate the typed name once non-empty; an invalid one shows the reason
@@ -68,7 +109,7 @@ export default function Contribute() {
   // PR mode only: in direct mode the field is unmounted and a stale typed name
   // must not silently disable the commit (round-1 review).
   const branchCheck =
-    mode === "pr" && branchName.trim() !== ""
+    mode === "pr" && !openPR && branchName.trim() !== ""
       ? saveOptions({ message, branchName, mode })
       : null;
   const branchError =
@@ -77,6 +118,9 @@ export default function Contribute() {
   // R3-994: `over` is a recovery action's override — the CT-6 resume context, a
   // switch-to-pr mode, or nothing (the Save button's own re-run). Every re-run
   // goes through the same validation.
+  // Hoisted: the compiler's dep inference wants the member expression, not a
+  // property path into it (react-hooks/preserve-manual-memoization).
+  const targetRef = vcs.target?.ref ?? null;
   const run = useCallback(
     async (over: Partial<ContributeOptions> = {}) => {
       // The mapping is saveOptions': a typed branch name rides along (validated
@@ -90,11 +134,18 @@ export default function Contribute() {
       // name that could be invalid — the bail is the guard for those paths.
       const opts = saveOptions({
         message,
-        branchName,
+        // An openPR run updates the existing branch: the (hidden) branch-name
+        // field's stale value must neither validate nor ride (round-1 review).
+        branchName: openPR ? "" : branchName,
         mode: over.mode ?? mode,
       });
       if (!opts.ok) return;
       setPhase({ kind: "running", stage: "starting" });
+      // The done event carries neither mode nor branchName (the wire shape),
+      // so the success copy keys on facts captured HERE: the openPR at run
+      // start (an update, not a fresh open) and the commit-pushed ref.
+      const updatingPr = openPR?.number ?? null;
+      let pushedRef: string | null = null;
       // §8.8: the force rides ONLY the checkbox's own PR-mode re-run — consume the
       // checked state on EVERY run (a non-carrying run clears it too, or the box's
       // residue attaches invisibly to a later PR-mode save once the checkbox is
@@ -141,6 +192,9 @@ export default function Contribute() {
             });
             return;
           }
+          if (ev.stage === "commit-pushed") {
+            pushedRef = (ev as { ref?: string }).ref ?? null;
+          }
           if (ev.stage === "done") {
             result = ev as unknown as ContributionResult;
           }
@@ -157,6 +211,8 @@ export default function Contribute() {
               branchName: "",
               mode: "new-branch-pr",
             } as ContributionResult),
+          updatedPr: updatingPr,
+          committedRef: pushedRef ?? targetRef,
         });
       } catch (e) {
         const code = (e as { code?: string })?.code ?? "unknown";
@@ -172,7 +228,7 @@ export default function Contribute() {
         });
       }
     },
-    [message, branchName, mode, forceUpdate],
+    [message, branchName, mode, forceUpdate, openPR, targetRef],
   );
 
   const errorHint = useMemo(() => {
@@ -233,7 +289,7 @@ export default function Contribute() {
         />
       </label>
 
-      {mode === "pr" && (
+      {mode === "pr" && !openPR && (
         <label className="ct-field">
           <span className="ct-label">Branch name</span>
           <input
@@ -251,28 +307,58 @@ export default function Contribute() {
         </label>
       )}
 
-      <div className="ct-mode" role="radiogroup" aria-label="Save mode">
-        <label className="ct-radio">
-          <input
-            type="radio"
-            name="mode"
-            checked={mode === "pr"}
-            onChange={() => setMode("pr")}
-            disabled={busy}
-          />
-          Pull request
-        </label>
-        <label className="ct-radio">
-          <input
-            type="radio"
-            name="mode"
-            checked={mode === "direct"}
-            onChange={() => setMode("direct")}
-            disabled={busy}
-          />
-          Commit directly
-        </label>
-      </div>
+      {openPR ? (
+        <div className="ct-note" role="status">
+          Updating PR #{openPR.number}
+          {vcs.target ? ` on branch ${vcs.target.ref}` : ""}.
+        </div>
+      ) : (
+        <>
+          {nonBranchTarget && vcs.target && (
+            <div className="ct-note" role="status">
+              {vcs.target.defaultBranch
+                ? `PR will target default branch ${vcs.target.defaultBranch} (loaded ref is a ${vcs.target.refKind}).`
+                : `PR will target the default branch (loaded ref is a ${vcs.target.refKind}).`}
+            </div>
+          )}
+          {noPush && (
+            <div className="ct-note" role="status">
+              No push access to {vcs.target ? `${vcs.target.namespace}/${vcs.target.repository}` : "the upstream repository"}{" "}
+              — the PR opens from your fork.
+            </div>
+          )}
+          <div className="ct-mode" role="radiogroup" aria-label="Save mode">
+            <label className="ct-radio">
+              <input
+                type="radio"
+                name="mode"
+                checked={mode === "pr"}
+                onChange={() => {
+                  setMode("pr");
+                  setModeTouched(true);
+                }}
+                disabled={busy}
+              />
+              Pull request
+            </label>
+            {!directHidden && (
+              <label className="ct-radio">
+                <input
+                  type="radio"
+                  name="mode"
+                  checked={mode === "direct"}
+                  onChange={() => {
+                    setMode("direct");
+                    setModeTouched(true);
+                  }}
+                  disabled={busy || pushUnknown}
+                />
+                Commit directly
+              </label>
+            )}
+          </div>
+        </>
+      )}
 
       <button
         type="button"
@@ -282,9 +368,11 @@ export default function Contribute() {
       >
         {busy
           ? (STAGE_LABEL[phase.stage] ?? "Saving…")
-          : mode === "direct"
-            ? "Commit"
-            : "Open pull request"}
+          : openPR
+            ? `Update PR #${openPR.number}`
+            : mode === "direct"
+              ? "Commit"
+              : "Open pull request"}
       </button>
 
       {phase.kind === "needs-install" && (
@@ -314,7 +402,9 @@ export default function Contribute() {
         <div className="ct-status ct-done" role="status">
           {phase.result.prUrl ? (
             <p>
-              Pull request opened —{" "}
+              {phase.updatedPr !== null
+                ? "Pull request updated — "
+                : "Pull request opened — "}
               <a
                 className="ct-link"
                 href={phase.result.prUrl}
@@ -326,8 +416,20 @@ export default function Contribute() {
             </p>
           ) : (
             <p>
-              Committed {phase.result.commitSha.slice(0, 7)} to{" "}
-              {phase.result.branchName}.
+              Committed{" "}
+              {vcs.target ? (
+                <a
+                  className="ct-link"
+                  href={`https://github.com/${vcs.target.namespace}/${vcs.target.repository}/commit/${phase.result.commitSha}`}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  {phase.result.commitSha.slice(0, 7)}
+                </a>
+              ) : (
+                phase.result.commitSha.slice(0, 7)
+              )}{" "}
+              {phase.committedRef ? ` to ${phase.committedRef}` : ""}.
             </p>
           )}
         </div>
