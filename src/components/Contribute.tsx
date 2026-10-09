@@ -118,6 +118,9 @@ export default function Contribute() {
   // R3-994: `over` is a recovery action's override — the CT-6 resume context, a
   // switch-to-pr mode, or nothing (the Save button's own re-run). Every re-run
   // goes through the same validation.
+  // Hoisted: the compiler's dep inference wants the member expression, not a
+  // property path into it (react-hooks/preserve-manual-memoization).
+  const targetRef = vcs.target?.ref ?? null;
   const run = useCallback(
     async (over: Partial<ContributeOptions> = {}) => {
       // The mapping is saveOptions': a typed branch name rides along (validated
@@ -209,7 +212,7 @@ export default function Contribute() {
               mode: "new-branch-pr",
             } as ContributionResult),
           updatedPr: updatingPr,
-          committedRef: pushedRef ?? vcs.target?.ref ?? null,
+          committedRef: pushedRef ?? targetRef,
         });
       } catch (e) {
         const code = (e as { code?: string })?.code ?? "unknown";
@@ -225,7 +228,7 @@ export default function Contribute() {
         });
       }
     },
-    [message, branchName, mode, forceUpdate, openPR, vcs.target?.ref],
+    [message, branchName, mode, forceUpdate, openPR, targetRef],
   );
 
   const errorHint = useMemo(() => {
