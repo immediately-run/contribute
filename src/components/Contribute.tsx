@@ -68,6 +68,10 @@ export default function Contribute() {
   // still decides) — a direct-mode run neither carries nor consumes it.
   const [forceUpdate, setForceUpdate] = useState(false);
   const [branchName, setBranchName] = useState("");
+  // CONTRIBUTE_TRANSCRIPT_SPEC §4 R-CT-5/8: the "Commit session transcript"
+  // request hint. Unchecked by default, held in component state only (never
+  // stored), and consumed by every run — the host's own review is the consent.
+  const [transcriptRequested, setTranscriptRequested] = useState(false);
   const [mode, setMode] = useState<ContributeMode>("pr");
   const [phase, setPhase] = useState<Phase>({ kind: "idle" });
 
@@ -104,6 +108,14 @@ export default function Contribute() {
 
   const busy = phase.kind === "running";
   const nothingToSave = dirtyPaths.length === 0;
+  // R-CT-3: the checkbox exists only while the host projects a qualifying agent
+  // session — no session renders no control, not a disabled one.
+  const hasAgentSession = (vcs.agentSession ?? null) !== null;
+  // A tick belongs to the control the user saw: when the fact is withdrawn the
+  // control unmounts and the tick goes with it, so a box that comes back with a
+  // later session starts unchecked (the same render-time adjustment as the
+  // hidden direct radio above).
+  if (!hasAgentSession && transcriptRequested) setTranscriptRequested(false);
   // R3-985: validate the typed name once non-empty; an invalid one shows the reason
   // inline and disables save. An untouched/empty field never errors.
   // PR mode only: in direct mode the field is unmounted and a stale typed name
@@ -138,6 +150,7 @@ export default function Contribute() {
         // field's stale value must neither validate nor ride (round-1 review).
         branchName: openPR ? "" : branchName,
         mode: over.mode ?? mode,
+        transcriptRequested,
       });
       if (!opts.ok) return;
       setPhase({ kind: "running", stage: "starting" });
@@ -153,6 +166,10 @@ export default function Contribute() {
       // caller-supplied branch name, which a direct commit has none of.
       const forceThisRun = forceUpdate && (over.mode ?? mode) === "pr";
       if (forceUpdate) setForceUpdate(false);
+      // R-CT-8: the transcript hint is spent on use — cleared before the call, so
+      // a run that fails or needs the App installed re-asks rather than silently
+      // re-sending, and the next contribution starts unchecked.
+      if (transcriptRequested) setTranscriptRequested(false);
       try {
         const stream = contribute({
           ...opts.options,
@@ -228,7 +245,7 @@ export default function Contribute() {
         });
       }
     },
-    [message, branchName, mode, forceUpdate, openPR, targetRef],
+    [message, branchName, mode, forceUpdate, transcriptRequested, openPR, targetRef],
   );
 
   const errorHint = useMemo(() => {
@@ -358,6 +375,18 @@ export default function Contribute() {
             )}
           </div>
         </>
+      )}
+
+      {hasAgentSession && (
+        <label className="ct-radio">
+          <input
+            type="checkbox"
+            checked={transcriptRequested}
+            onChange={(e) => setTranscriptRequested(e.target.checked)}
+            disabled={busy}
+          />
+          Commit session transcript
+        </label>
       )}
 
       <button
