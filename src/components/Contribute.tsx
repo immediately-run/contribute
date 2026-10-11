@@ -111,6 +111,11 @@ export default function Contribute() {
   // R-CT-3: the checkbox exists only while the host projects a qualifying agent
   // session — no session renders no control, not a disabled one.
   const hasAgentSession = (vcs.agentSession ?? null) !== null;
+  // A tick belongs to the control the user saw: when the fact is withdrawn the
+  // control unmounts and the tick goes with it, so a box that comes back with a
+  // later session starts unchecked (the same render-time adjustment as the
+  // hidden direct radio above).
+  if (!hasAgentSession && transcriptRequested) setTranscriptRequested(false);
   // R3-985: validate the typed name once non-empty; an invalid one shows the reason
   // inline and disables save. An untouched/empty field never errors.
   // PR mode only: in direct mode the field is unmounted and a stale typed name
@@ -145,10 +150,7 @@ export default function Contribute() {
         // field's stale value must neither validate nor ride (round-1 review).
         branchName: openPR ? "" : branchName,
         mode: over.mode ?? mode,
-        // Only a box the user can currently see may ride: if the session fact was
-        // withdrawn after the box was checked, the control is gone and its state
-        // must not attach invisibly to this run.
-        transcriptRequested: transcriptRequested && hasAgentSession,
+        transcriptRequested,
       });
       if (!opts.ok) return;
       setPhase({ kind: "running", stage: "starting" });
@@ -243,7 +245,7 @@ export default function Contribute() {
         });
       }
     },
-    [message, branchName, mode, forceUpdate, transcriptRequested, hasAgentSession, openPR, targetRef],
+    [message, branchName, mode, forceUpdate, transcriptRequested, openPR, targetRef],
   );
 
   const errorHint = useMemo(() => {
