@@ -9,17 +9,39 @@ import {
   useEditorContext,
   useVcsState,
   type ContributeMode,
+  type ContributeOptions,
   type ContributionEvent,
   type ContributionResult,
 } from "@immediately-run/sdk";
+import { recoveryPlan, type RecoveryPlan } from "../lib/recovery";
+import { BRANCH_NAME_PLACEHOLDER, saveOptions } from "../lib/saveOptions";
+import RecoveryActions from "./RecoveryActions";
 import "./Contribute.css";
 
 type Phase =
   | { kind: "idle" }
   | { kind: "running"; stage: string }
-  | { kind: "needs-install"; installUrl: string; targetOwner: string; targetRepo: string }
-  | { kind: "done"; result: ContributionResult }
-  | { kind: "error"; code: string; message: string };
+  | {
+      kind: "needs-install";
+      installUrl: string;
+      targetOwner: string;
+      targetRepo: string;
+    }
+  | {
+      kind: "done";
+      result: ContributionResult;
+      /** The PR this run UPDATED (the openPR fact at run start) — the wire's
+       *  done event carries no mode, so the update copy keys on this. */
+      updatedPr: number | null;
+      /** The ref a direct commit landed on (the commit-pushed event, else the
+       *  target's) — the done event carries no branchName either. */
+      committedRef: string | null;
+    }
+  // R3-994: the error phase carries the recovery plan (from the event's
+  // `recovery` field + whether the branch name was typed) and the event's real
+  // code when there is one — the event carries none, the catch path carries the
+  // thrown one, and the hardcoded "failed" is gone.
+  | { kind: "error"; code: string | null; message: string; plan: RecoveryPlan };
 
 // Friendly one-liners for the orchestrator stages (CONTRIBUTE_SPEC §15.7).
 const STAGE_LABEL: Record<string, string> = {
@@ -39,64 +61,194 @@ const STAGE_LABEL: Record<string, string> = {
 
 export default function Contribute() {
   const { dirtyPaths } = useEditorContext();
-  const { agentSession } = useVcsState();
   const [message, setMessage] = useState("");
-  const [mode, setMode] = useState<ContributeMode>("pr");
-  // R-CT-5/8: the "Commit session transcript" request hint — rendered iff the
-  // host projects a qualifying session (absent ⇒ NO control, R-CT-3),
-  // default unchecked, spent on use: every run() resets it before the call.
+  // R3-994 (CONTRIBUTE_SPEC §8.8): the force-update checkbox, offered only after a
+  // `use-different-name` error on a name the user typed; checked rides the
+  // checkbox's own PR-mode re-run as forceUpdateBranch (the host's lineage gate
+  // still decides) — a direct-mode run neither carries nor consumes it.
+  const [forceUpdate, setForceUpdate] = useState(false);
+  const [branchName, setBranchName] = useState("");
+  // CONTRIBUTE_TRANSCRIPT_SPEC §4 R-CT-5/8: the "Commit session transcript"
+  // request hint. Unchecked by default, held in component state only (never
+  // stored), and consumed by every run — the host's own review is the consent.
   const [transcriptRequested, setTranscriptRequested] = useState(false);
+  const [mode, setMode] = useState<ContributeMode>("pr");
   const [phase, setPhase] = useState<Phase>({ kind: "idle" });
+
+  // R3-964/986 (CONTRIBUTE_SPEC §15.0): the save mode facts ride the host's
+  // VcsState push — no app-side GitHub call. Absent facts render today's form.
+  const vcs = useVcsState();
+  // The default (rule 4) applies when the fact first arrives — and re-applies
+  // if the host's answer CHANGES before the user chooses — but never
+  // overwrites a choice the user has made. (Adjusted during render, the
+  // sanctioned pattern — an effect's setState is a cascading render, and this
+  // app's lint refuses it.)
+  const [modeTouched, setModeTouched] = useState(false);
+  // `undefined` initially, NOT the first render's value — the fact may already
+  // be set at mount, and initialising to it would make the change check
+  // vacuous exactly when the default is present from the start.
+  const [appliedDefault, setAppliedDefault] = useState<typeof vcs.defaultSaveMode>(undefined);
+  if (vcs.defaultSaveMode !== appliedDefault) {
+    setAppliedDefault(vcs.defaultSaveMode);
+    if (!modeTouched && vcs.defaultSaveMode) setMode(vcs.defaultSaveMode);
+  }
+
+  // Rule 1: an open PR on the loaded branch — the picker hides, the run updates it.
+  const openPR = vcs.openPR ?? null;
+  // Rule 2: a tag/commit load forces a PR against the default branch.
+  const nonBranchTarget = (vcs.target ?? null) !== null && vcs.target!.refKind !== "branch";
+  // Rule 3: no push access upstream forces the fork PR.
+  const noPush = vcs.canPushUpstream === false;
+  // …and while the probe is still out (null), the direct radio is disabled, not
+  // hidden — the choice exists, its answer is not in yet.
+  const pushUnknown = vcs.canPushUpstream === null;
+  const directHidden = openPR !== null || nonBranchTarget || noPush;
+  // A hidden radio can't stay checked (same render-time adjustment as above).
+  if (directHidden && mode === "direct") setMode("pr");
 
   const busy = phase.kind === "running";
   const nothingToSave = dirtyPaths.length === 0;
+  // R-CT-3: the checkbox exists only while the host projects a qualifying agent
+  // session — no session renders no control, not a disabled one.
+  const hasAgentSession = (vcs.agentSession ?? null) !== null;
+  // R3-985: validate the typed name once non-empty; an invalid one shows the reason
+  // inline and disables save. An untouched/empty field never errors.
+  // PR mode only: in direct mode the field is unmounted and a stale typed name
+  // must not silently disable the commit (round-1 review).
+  const branchCheck =
+    mode === "pr" && !openPR && branchName.trim() !== ""
+      ? saveOptions({ message, branchName, mode })
+      : null;
+  const branchError =
+    branchCheck && !branchCheck.ok ? branchCheck.reason : null;
 
-  const run = useCallback(async () => {
-    setPhase({ kind: "running", stage: "starting" });
-    // R-CT-8: the hint is spent on use — reset BEFORE the call, so a retry
-    // after a failure asks again rather than silently re-sending.
-    const wantTranscript = transcriptRequested;
-    setTranscriptRequested(false);
-    try {
-      const stream = contribute({
-        commitMessage: message.trim() || "Update",
-        mode,
-        // The hint is present only when set — never a false (the host reads
-        // presence, and nothing else transcript-shaped may ride: R-CT-6).
-        ...(wantTranscript ? { transcriptRequested: true } : {}),
+  // R3-994: `over` is a recovery action's override — the CT-6 resume context, a
+  // switch-to-pr mode, or nothing (the Save button's own re-run). Every re-run
+  // goes through the same validation.
+  // Hoisted: the compiler's dep inference wants the member expression, not a
+  // property path into it (react-hooks/preserve-manual-memoization).
+  const targetRef = vcs.target?.ref ?? null;
+  const run = useCallback(
+    async (over: Partial<ContributeOptions> = {}) => {
+      // The mapping is saveOptions': a typed branch name rides along (validated
+      // there), an empty field sends none (the host generates the default).
+      // Validate BEFORE entering the running phase — the needs-install retry reaches
+      // here unguarded, and a bail after setPhase would wedge the form (round-1 review).
+      // A switch-to-pr override decides BEFORE saveOptions: the render-time mode
+      // would discard the typed branch name the re-run must carry. The bail is NOT
+      // unreachable: the Save button's disabled-save guard holds for it, but the
+      // recovery buttons and the needs-install retry reach here with a stale typed
+      // name that could be invalid — the bail is the guard for those paths.
+      const opts = saveOptions({
+        message,
+        // An openPR run updates the existing branch: the (hidden) branch-name
+        // field's stale value must neither validate nor ride (round-1 review).
+        branchName: openPR ? "" : branchName,
+        mode: over.mode ?? mode,
+        // Only a box the user can currently see may ride: if the session fact was
+        // withdrawn after the box was checked, the control is gone and its state
+        // must not attach invisibly to this run.
+        transcriptRequested: transcriptRequested && hasAgentSession,
       });
-      let result: ContributionResult | undefined;
-      for await (const ev of stream as AsyncGenerator<ContributionEvent, ContributionResult>) {
-        if (ev.stage === "install-required") {
-          // Forward-only v1 (§5.1): the GitHub App must be installed on the target.
-          // Show the link; after installing, the user retries (a fresh stream).
-          setPhase({
-            kind: "needs-install",
-            installUrl: ev.installUrl,
-            targetOwner: ev.targetOwner,
-            targetRepo: ev.targetRepo,
-          });
-          return;
+      if (!opts.ok) return;
+      setPhase({ kind: "running", stage: "starting" });
+      // The done event carries neither mode nor branchName (the wire shape),
+      // so the success copy keys on facts captured HERE: the openPR at run
+      // start (an update, not a fresh open) and the commit-pushed ref.
+      const updatingPr = openPR?.number ?? null;
+      let pushedRef: string | null = null;
+      // §8.8: the force rides ONLY the checkbox's own PR-mode re-run — consume the
+      // checked state on EVERY run (a non-carrying run clears it too, or the box's
+      // residue attaches invisibly to a later PR-mode save once the checkbox is
+      // unreachable), and only a PR-mode run can carry it at all: §8.8 is about a
+      // caller-supplied branch name, which a direct commit has none of.
+      const forceThisRun = forceUpdate && (over.mode ?? mode) === "pr";
+      if (forceUpdate) setForceUpdate(false);
+      // R-CT-8: the transcript hint is spent on use — cleared before the call, so
+      // a run that fails or needs the App installed re-asks rather than silently
+      // re-sending, and the next contribution starts unchecked.
+      if (transcriptRequested) setTranscriptRequested(false);
+      try {
+        const stream = contribute({
+          ...opts.options,
+          ...over,
+          ...(forceThisRun ? { forceUpdateBranch: true } : {}),
+        });
+        let result: ContributionResult | undefined;
+        for await (const ev of stream as AsyncGenerator<
+          ContributionEvent,
+          ContributionResult
+        >) {
+          if (ev.stage === "install-required") {
+            // Forward-only v1 (§5.1): the GitHub App must be installed on the target.
+            // Show the link; after installing, the user retries (a fresh stream).
+            setPhase({
+              kind: "needs-install",
+              installUrl: ev.installUrl,
+              targetOwner: ev.targetOwner,
+              targetRepo: ev.targetRepo,
+            });
+            return;
+          }
+          if (ev.stage === "error") {
+            // R3-994: the plan comes from the event's `recovery` (+ the typed-name
+            // fact about the run that just failed — the mode it used and the name it
+            // carried, not the render-time radio); the code is the event's real one
+            // when present — it carries none, so null (the hint map falls to the
+            // message), never "failed".
+            setPhase({
+              kind: "error",
+              code: null,
+              message: ev.message,
+              plan: recoveryPlan(
+                ev,
+                branchName.trim() !== "" && (over.mode ?? mode) === "pr",
+              ),
+            });
+            return;
+          }
+          if (ev.stage === "commit-pushed") {
+            pushedRef = (ev as { ref?: string }).ref ?? null;
+          }
+          if (ev.stage === "done") {
+            result = ev as unknown as ContributionResult;
+          }
+          setPhase({ kind: "running", stage: ev.stage });
         }
-        if (ev.stage === "error") {
-          setPhase({ kind: "error", code: "failed", message: ev.message });
-          return;
-        }
-        if (ev.stage === "done") {
-          result = ev as unknown as ContributionResult;
-        }
-        setPhase({ kind: "running", stage: ev.stage });
+        // The generator's RETURN value is the settled result; prefer it.
+        setPhase({
+          kind: "done",
+          result:
+            result ??
+            ({
+              commitSha: "",
+              treeSha: "",
+              branchName: "",
+              mode: "new-branch-pr",
+            } as ContributionResult),
+          updatedPr: updatingPr,
+          committedRef: pushedRef ?? targetRef,
+        });
+      } catch (e) {
+        const code = (e as { code?: string })?.code ?? "unknown";
+        // A refused resume (`forbidden`, the host's ledger refusing a context it
+        // did not mint) lands here: the thrown message IS the description — a
+        // canned permission hint would misdescribe it — so code null lets the
+        // hint map fall to the message.
+        setPhase({
+          kind: "error",
+          code: over.resume !== undefined ? null : code,
+          message: (e as Error)?.message ?? "Save failed",
+          plan: null,
+        });
       }
-      // The generator's RETURN value is the settled result; prefer it.
-      setPhase({ kind: "done", result: result ?? ({ commitSha: "", treeSha: "", branchName: "", mode: "new-branch-pr" } as ContributionResult) });
-    } catch (e) {
-      const code = (e as { code?: string })?.code ?? "unknown";
-      setPhase({ kind: "error", code, message: (e as Error)?.message ?? "Save failed" });
-    }
-  }, [message, mode, transcriptRequested]);
+    },
+    [message, branchName, mode, forceUpdate, transcriptRequested, hasAgentSession, openPR, targetRef],
+  );
 
   const errorHint = useMemo(() => {
     if (phase.kind !== "error") return null;
+    if (phase.code === null) return phase.message;
     switch (phase.code) {
       case "auth-required":
         return "Sign in to save your changes.";
@@ -127,7 +279,8 @@ export default function Contribute() {
         ) : (
           <>
             <p className="ct-changes-h">
-              {dirtyPaths.length} file{dirtyPaths.length === 1 ? "" : "s"} will be saved
+              {dirtyPaths.length} file{dirtyPaths.length === 1 ? "" : "s"} will
+              be saved
             </p>
             <ul className="ct-filelist">
               {dirtyPaths.map((p) => (
@@ -151,31 +304,79 @@ export default function Contribute() {
         />
       </label>
 
-      <div className="ct-mode" role="radiogroup" aria-label="Save mode">
-        <label className="ct-radio">
+      {mode === "pr" && !openPR && (
+        <label className="ct-field">
+          <span className="ct-label">Branch name</span>
           <input
-            type="radio"
-            name="mode"
-            checked={mode === "pr"}
-            onChange={() => setMode("pr")}
+            className="ct-input"
+            value={branchName}
+            placeholder={BRANCH_NAME_PLACEHOLDER}
+            onChange={(e) => setBranchName(e.target.value)}
             disabled={busy}
           />
-          Pull request
+          {branchError && (
+            <span className="ct-field-error">
+              Invalid branch name: {branchError}
+            </span>
+          )}
         </label>
-        <label className="ct-radio">
-          <input
-            type="radio"
-            name="mode"
-            checked={mode === "direct"}
-            onChange={() => setMode("direct")}
-            disabled={busy}
-          />
-          Commit directly
-        </label>
-      </div>
+      )}
 
-      {agentSession != null && (
-        <label className="ct-transcript">
+      {openPR ? (
+        <div className="ct-note" role="status">
+          Updating PR #{openPR.number}
+          {vcs.target ? ` on branch ${vcs.target.ref}` : ""}.
+        </div>
+      ) : (
+        <>
+          {nonBranchTarget && vcs.target && (
+            <div className="ct-note" role="status">
+              {vcs.target.defaultBranch
+                ? `PR will target default branch ${vcs.target.defaultBranch} (loaded ref is a ${vcs.target.refKind}).`
+                : `PR will target the default branch (loaded ref is a ${vcs.target.refKind}).`}
+            </div>
+          )}
+          {noPush && (
+            <div className="ct-note" role="status">
+              No push access to {vcs.target ? `${vcs.target.namespace}/${vcs.target.repository}` : "the upstream repository"}{" "}
+              — the PR opens from your fork.
+            </div>
+          )}
+          <div className="ct-mode" role="radiogroup" aria-label="Save mode">
+            <label className="ct-radio">
+              <input
+                type="radio"
+                name="mode"
+                checked={mode === "pr"}
+                onChange={() => {
+                  setMode("pr");
+                  setModeTouched(true);
+                }}
+                disabled={busy}
+              />
+              Pull request
+            </label>
+            {!directHidden && (
+              <label className="ct-radio">
+                <input
+                  type="radio"
+                  name="mode"
+                  checked={mode === "direct"}
+                  onChange={() => {
+                    setMode("direct");
+                    setModeTouched(true);
+                  }}
+                  disabled={busy || pushUnknown}
+                />
+                Commit directly
+              </label>
+            )}
+          </div>
+        </>
+      )}
+
+      {hasAgentSession && (
+        <label className="ct-radio">
           <input
             type="checkbox"
             checked={transcriptRequested}
@@ -189,14 +390,20 @@ export default function Contribute() {
       <button
         type="button"
         className="ct-save"
-        onClick={run}
-        disabled={busy || nothingToSave}
+        onClick={() => void run()}
+        disabled={busy || nothingToSave || branchError !== null}
       >
-        {busy ? STAGE_LABEL[phase.stage] ?? "Saving…" : mode === "direct" ? "Commit" : "Open pull request"}
+        {busy
+          ? (STAGE_LABEL[phase.stage] ?? "Saving…")
+          : openPR
+            ? `Update PR #${openPR.number}`
+            : mode === "direct"
+              ? "Commit"
+              : "Open pull request"}
       </button>
 
       {phase.kind === "needs-install" && (
-        <div className="ct-status ct-install">
+        <div className="ct-status ct-install" role="status">
           <p>
             Install the immediately.run GitHub App on{" "}
             <strong>
@@ -204,31 +411,72 @@ export default function Contribute() {
             </strong>{" "}
             to save here.
           </p>
-          <a className="ct-link" href={phase.installUrl} target="_blank" rel="noreferrer">
+          <a
+            className="ct-link"
+            href={phase.installUrl}
+            target="_blank"
+            rel="noreferrer"
+          >
             Install…
           </a>{" "}
-          <button type="button" className="ct-retry" onClick={run}>
+          <button type="button" className="ct-retry" onClick={() => void run()}>
             I've installed — retry
           </button>
         </div>
       )}
 
       {phase.kind === "done" && (
-        <div className="ct-status ct-done">
+        <div className="ct-status ct-done" role="status">
           {phase.result.prUrl ? (
             <p>
-              Pull request opened —{" "}
-              <a className="ct-link" href={phase.result.prUrl} target="_blank" rel="noreferrer">
+              {phase.updatedPr !== null
+                ? "Pull request updated — "
+                : "Pull request opened — "}
+              <a
+                className="ct-link"
+                href={phase.result.prUrl}
+                target="_blank"
+                rel="noreferrer"
+              >
                 #{phase.result.prNumber}
               </a>
             </p>
           ) : (
-            <p>Committed {phase.result.commitSha.slice(0, 7)} to {phase.result.branchName}.</p>
+            <p>
+              Committed{" "}
+              {vcs.target ? (
+                <a
+                  className="ct-link"
+                  href={`https://github.com/${vcs.target.namespace}/${vcs.target.repository}/commit/${phase.result.commitSha}`}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  {phase.result.commitSha.slice(0, 7)}
+                </a>
+              ) : (
+                phase.result.commitSha.slice(0, 7)
+              )}{" "}
+              {phase.committedRef ? ` to ${phase.committedRef}` : ""}.
+            </p>
           )}
         </div>
       )}
 
-      {phase.kind === "error" && <div className="ct-status ct-error">{errorHint}</div>}
+      {phase.kind === "error" && (
+        <div className="ct-status ct-error" role="alert">
+          {errorHint}
+          {phase.plan &&
+            (mode === "pr" || phase.plan.action !== "use-different-name") && (
+              <RecoveryActions
+                plan={phase.plan}
+                rerun={run}
+                setMode={setMode}
+                forceUpdate={forceUpdate}
+                setForceUpdate={setForceUpdate}
+              />
+            )}
+        </div>
+      )}
     </div>
   );
 }

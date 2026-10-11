@@ -14,13 +14,12 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@immediately-run/sdk": "^0.75.0",
+    "@immediately-run/sdk": "^0.87.1",
     "react": "^19.2.5",
     "react-dom": "^19.2.5"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
-    "@testing-library/dom": "^10.4.2",
     "@testing-library/react": "^16.3.3",
     "@types/node": "^24.12.2",
     "@types/react": "^19.2.14",
@@ -34,7 +33,7 @@
     "typescript": "~6.0.2",
     "typescript-eslint": "^8.58.2",
     "vite": "^8.0.9",
-    "vitest": "^3.2.7"
+    "vitest": "^3.2.4"
   },
-  "description": "The contribute dialog as an immediately.run app \u2014 streams a save (PR or direct commit) of your edits."
+  "description": "The contribute dialog as an immediately.run app — streams a save (PR or direct commit) of your edits."
 }
