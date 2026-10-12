@@ -15,6 +15,7 @@ import {
 } from "@immediately-run/sdk";
 import { recoveryPlan, type RecoveryPlan } from "../lib/recovery";
 import { BRANCH_NAME_PLACEHOLDER, saveOptions } from "../lib/saveOptions";
+import { commitLanded } from "../lib/transcriptSpend";
 import RecoveryActions from "./RecoveryActions";
 import "./Contribute.css";
 
@@ -70,7 +71,8 @@ export default function Contribute() {
   const [branchName, setBranchName] = useState("");
   // CONTRIBUTE_TRANSCRIPT_SPEC §4 R-CT-5/8: the "Commit session transcript"
   // request hint. Unchecked by default, held in component state only (never
-  // stored), and consumed by every run — the host's own review is the consent.
+  // stored). R-CT-8 as amended: a run whose commit lands spends it; any other run
+  // keeps it — the host's own review is the consent (the spend site is below).
   const [transcriptRequested, setTranscriptRequested] = useState(false);
   const [mode, setMode] = useState<ContributeMode>("pr");
   const [phase, setPhase] = useState<Phase>({ kind: "idle" });
@@ -115,7 +117,14 @@ export default function Contribute() {
   // control unmounts and the tick goes with it, so a box that comes back with a
   // later session starts unchecked (the same render-time adjustment as the
   // hidden direct radio above).
-  if (!hasAgentSession && transcriptRequested) setTranscriptRequested(false);
+  // R3-1189 (R-CT-5's mode clause): the checkbox is visible iff the session fact is
+  // present AND the resolved mode is a PR mode. `mode` is the resolved live fact —
+  // the host's `defaultSaveMode` applied on arrival (its absence RESOLVES to "pr"
+  // per the SDK's contract) or the reader's explicit choice — re-read on every
+  // render. Hiding clears the tick: a tick made in a PR mode must not survive a
+  // switch to direct and back.
+  const transcriptVisible = hasAgentSession && mode === "pr";
+  if (!transcriptVisible && transcriptRequested) setTranscriptRequested(false);
   // R3-985: validate the typed name once non-empty; an invalid one shows the reason
   // inline and disables save. An untouched/empty field never errors.
   // PR mode only: in direct mode the field is unmounted and a stale typed name
@@ -137,9 +146,9 @@ export default function Contribute() {
     async (over: Partial<ContributeOptions> = {}) => {
       // The mapping is saveOptions': a typed branch name rides along (validated
       // there), an empty field sends none (the host generates the default).
-      // Validate BEFORE entering the running phase — the needs-install retry reaches
+      // Validate before entering the running phase — the needs-install retry reaches
       // here unguarded, and a bail after setPhase would wedge the form (round-1 review).
-      // A switch-to-pr override decides BEFORE saveOptions: the render-time mode
+      // A switch-to-pr override decides before saveOptions: the render-time mode
       // would discard the typed branch name the re-run must carry. The bail is NOT
       // unreachable: the Save button's disabled-save guard holds for it, but the
       // recovery buttons and the needs-install retry reach here with a stale typed
@@ -166,10 +175,9 @@ export default function Contribute() {
       // caller-supplied branch name, which a direct commit has none of.
       const forceThisRun = forceUpdate && (over.mode ?? mode) === "pr";
       if (forceUpdate) setForceUpdate(false);
-      // R-CT-8: the transcript hint is spent on use — cleared before the call, so
-      // a run that fails or needs the App installed re-asks rather than silently
-      // re-sending, and the next contribution starts unchecked.
-      if (transcriptRequested) setTranscriptRequested(false);
+      // R-CT-8 as amended (R3-1189): the tick is NOT spent on use — a run that
+      // fails, is cancelled, or needs the App installed keeps it, so the reader
+      // genuinely re-asks; only a committed run clears it (the done path below).
       try {
         const stream = contribute({
           ...opts.options,
@@ -215,9 +223,14 @@ export default function Contribute() {
           if (ev.stage === "done") {
             result = ev as unknown as ContributionResult;
           }
+          if (commitLanded(ev)) {
+            // R-CT-8 as amended (R3-1189): the commit landed upstream — the tick
+            // spends here, wherever the run goes next. create-branch deliberately
+            // spends nothing: the host yields it before the ref exists.
+            setTranscriptRequested(false);
+          }
           setPhase({ kind: "running", stage: ev.stage });
         }
-        // The generator's RETURN value is the settled result; prefer it.
         setPhase({
           kind: "done",
           result:
@@ -377,7 +390,7 @@ export default function Contribute() {
         </>
       )}
 
-      {hasAgentSession && (
+      {transcriptVisible && (
         <label className="ct-radio">
           <input
             type="checkbox"
