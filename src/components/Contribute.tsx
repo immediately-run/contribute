@@ -15,6 +15,7 @@ import {
 } from "@immediately-run/sdk";
 import { recoveryPlan, type RecoveryPlan } from "../lib/recovery";
 import { BRANCH_NAME_PLACEHOLDER, saveOptions } from "../lib/saveOptions";
+import { commitLanded } from "../lib/transcriptSpend";
 import RecoveryActions from "./RecoveryActions";
 import "./Contribute.css";
 
@@ -70,7 +71,8 @@ export default function Contribute() {
   const [branchName, setBranchName] = useState("");
   // CONTRIBUTE_TRANSCRIPT_SPEC §4 R-CT-5/8: the "Commit session transcript"
   // request hint. Unchecked by default, held in component state only (never
-  // stored), and consumed by every run — the host's own review is the consent.
+    // R-CT-8 as amended: a run whose commit lands spends it; any other run keeps it —
+  // the host's own review is the consent (the spend site is the run loop below).
   const [transcriptRequested, setTranscriptRequested] = useState(false);
   const [mode, setMode] = useState<ContributeMode>("pr");
   const [phase, setPhase] = useState<Phase>({ kind: "idle" });
@@ -116,12 +118,12 @@ export default function Contribute() {
   // later session starts unchecked (the same render-time adjustment as the
   // hidden direct radio above).
   // R3-1189 (R-CT-5's mode clause): the checkbox is visible iff the session fact is
-  // present AND the resolved mode is a PR mode AND the mode is KNOWN (the reader
-  // touched it, or the host's default has arrived) - an unknown-while-resolving mode
-  // hides it. Hiding clears the tick: a tick made in a PR mode must not survive a
+  // present AND the resolved mode is a PR mode. `mode` is the resolved live fact —
+  // the host's `defaultSaveMode` applied on arrival (its absence RESOLVES to "pr"
+  // per the SDK's contract) or the reader's explicit choice — re-read on every
+  // render. Hiding clears the tick: a tick made in a PR mode must not survive a
   // switch to direct and back.
-  const modeKnown = modeTouched || vcs.defaultSaveMode != null;
-  const transcriptVisible = hasAgentSession && mode === "pr" && modeKnown;
+  const transcriptVisible = hasAgentSession && mode === "pr";
   if (!transcriptVisible && transcriptRequested) setTranscriptRequested(false);
   // R3-985: validate the typed name once non-empty; an invalid one shows the reason
   // inline and disables save. An untouched/empty field never errors.
@@ -220,18 +222,15 @@ export default function Contribute() {
           }
           if (ev.stage === "done") {
             result = ev as unknown as ContributionResult;
-            // R-CT-8 as amended (R3-1189): a done that carries a commit spent the
-            // tick (some producers yield the commit only here, never returning it).
-            if ((ev as { commitSha?: string }).commitSha) setTranscriptRequested(false);
+          }
+          if (commitLanded(ev)) {
+            // R-CT-8 as amended (R3-1189): the commit landed upstream — the tick
+            // spends here, wherever the run goes next. create-branch deliberately
+            // spends nothing: the host yields it BEFORE the ref exists.
+            setTranscriptRequested(false);
           }
           setPhase({ kind: "running", stage: ev.stage });
         }
-        // The generator's RETURN value is the settled result; prefer it.
-        // R-CT-8 as amended (R3-1189): a COMMITTED run spends the tick — the
-        // commit-pushed ref (or the settled result's commit) is the fact a commit
-        // landed; anything that ended without one kept it through the failure
-        // paths above.
-        if (pushedRef || result?.commitSha) setTranscriptRequested(false);
         setPhase({
           kind: "done",
           result:
