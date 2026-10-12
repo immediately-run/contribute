@@ -592,7 +592,8 @@ describe("Contribute — the transcript request checkbox (R3-659)", () => {
     running: false,
   };
   // R3-1189 (R-CT-5's mode clause): the checkbox shows only when the resolved
-  // mode is a PR mode — every showing setup carries the host's resolved fact.
+  // mode is a PR mode. Every showing setup carries the host's resolved fact —
+  // except the absent-default case, which the SDK itself resolves to pr.
   const prSession = { agentSession, defaultSaveMode: "pr" };
   const transcriptBox = () =>
     screen.getByRole("checkbox", {
