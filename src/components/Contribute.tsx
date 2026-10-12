@@ -220,6 +220,9 @@ export default function Contribute() {
           }
           if (ev.stage === "done") {
             result = ev as unknown as ContributionResult;
+            // R-CT-8 as amended (R3-1189): a done that carries a commit spent the
+            // tick (some producers yield the commit only here, never returning it).
+            if ((ev as { commitSha?: string }).commitSha) setTranscriptRequested(false);
           }
           setPhase({ kind: "running", stage: ev.stage });
         }
